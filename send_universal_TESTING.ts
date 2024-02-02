@@ -114,7 +114,6 @@ async function updateBestGivers(liteClient: TonClient4 | LiteClient, myAddress: 
             // const powStack = Cell.fromBase64(powInfo.result as string)
             // const stack = parseTuple(powStack)
 
-
             const reader = new TupleReader(stack.result)
             const seed = reader.readBigNumber()
             const complexity = reader.readBigNumber()
@@ -220,15 +219,10 @@ async function main() {
             console.log('Using TonHub API')
             liteClient = await getTon4Client()
         }
-
     }
 
     const keyPair = await mnemonicToWalletKey(mySeed.split(' '))
     const wallet = WalletContractV4.create({
-        workchain: 0,
-        publicKey: keyPair.publicKey
-    })
-    const walletv3r2 = WalletContractV3R2.create({
         workchain: 0,
         publicKey: keyPair.publicKey
     })
@@ -239,21 +233,16 @@ async function main() {
     }
     const opened = liteClient.open(wallet)
 
-    var address_giver = givers[0]
-
-    if (givers.length > 1) {
-        await updateBestGivers(liteClient, wallet.address)
-
-        setInterval(() => {
-            updateBestGivers(liteClient, wallet.address)
-        }, 1000)
-    }
+    await updateBestGivers(liteClient, wallet.address)
+    setInterval(() => {
+        updateBestGivers(liteClient, wallet.address)
+    }, 30000)
 
     while (go) {
         // console.log('waiting master')
         const nextMaster  = await getNextMaster(liteClient)
         // console.log('got next master')
-        const giverAddress = bestGiver.address || address_giver.address
+        const giverAddress = bestGiver.address
         const [seed, complexity, iterations] = await getPowInfo(liteClient, Address.parse(giverAddress), nextMaster)
 
         // console.log(`${new Date()}:     Address: ${chalk.bold(chalk.blue(giverAddress))}`)
@@ -318,22 +307,27 @@ async function sendMinedBoc(
     giverAddress: string,
     boc: Cell
 ) {
-    const liteServerClient = await getLiteClient(args['-c'] ?? 'https://ton-blockchain.github.io/global.config.json')
     const ton4Client = await getTon4Client()
     const tonOrbsClient = await getTon4ClientOrbs()
-    // const toncenterClient = await getTonCenterClient()
+    const wallets: OpenedContract<WalletContractV4>[] = []
 
-    sendTransfer(liteServerClient.open(wallet), seqno, keyPair, giverAddress, boc)
-    sendTransfer(ton4Client.open(wallet), seqno, keyPair, giverAddress, boc)
-    sendTransfer(tonOrbsClient.open(wallet), seqno, keyPair, giverAddress, boc)
-    // sendTransfer(toncenterClient.open(wallet), seqno, keyPair, giverAddress, boc)
+    wallets.push(ton4Client.open(wallet))
+    wallets.push(tonOrbsClient.open(wallet))
 
-    // const w1 = liteServerClient.open(wallet)
-    // const w2 = ton4Client.open(wallet)
-    // const w3 = tonOrbsClient.open(wallet)
-    // const w4 = toncenterClient.open(wallet)
+    if (args['--api'] === 'lite') {
+        const liteServerClient = await getLiteClient(args['-c'] ?? 'https://ton-blockchain.github.io/global.config.json')
+        wallets.push(liteServerClient.open(wallet))
+    }
 
-    // const wallets = [w1, w2, w3]
+    // const promises = wallets.map(w => sendTransfer(w, seqno, keyPair, giverAddress, boc))
+    // await Promise.all(promises)
+
+    // retry 3 times for all wallets
+    for (let i = 0; i < 3; i++) {
+        for (const w of wallets) {
+            await sendTransfer(w, seqno, keyPair, giverAddress, boc)
+        }
+    }
 }
 
 
