@@ -10,7 +10,7 @@ import dotenv from 'dotenv'
 import { givers100, givers1000 } from './givers'
 import arg from 'arg'
 import { LiteClient, LiteSingleEngine, LiteRoundRobinEngine } from 'ton-lite-client';
-import { getLiteClient, getTon4Client, getTon4ClientOrbs, getTonCenterClient } from './client';
+import { getLiteClient, getTon4Client, getTon4ClientOrbs, getTonCenterClient, getTonapiClient } from './client';
 import { HighloadWalletV2 } from '@scaleton/highload-wallet';
 import { OpenedContract } from '@ton/core';
 import { Api } from 'tonapi-sdk-js';
@@ -19,6 +19,8 @@ dotenv.config({ path: 'config.txt.txt' })
 dotenv.config({ path: '.env.txt' })
 dotenv.config()
 dotenv.config({ path: 'config.txt' })
+
+type ApiObj = LiteClient | TonClient4 | Api<unknown>
 
 const args = arg({
     '--givers': Number, // 100 1000 10000
@@ -50,7 +52,7 @@ if (args['--givers']) {
             break
     }
 } else {
-    console.log('Using givers 10 000')
+    console.log('Using givers 1 000')
 }
 
 let bin = '.\\pow-miner-cuda.exe'
@@ -80,75 +82,15 @@ const totalDiff = BigInt('115792089237277217110272752943501742914102634520085823
 
 
 let bestGiver: { address: string, coins: number } = { address: '', coins: 0 }
-async function updateBestGivers(liteClient: TonClient4 | LiteClient, myAddress: Address) {
-    let whitelistGivers = allowShards ? [...givers] : givers.filter((giver) => {
-        const shardMaxDepth = 1
-        const giverAddress = Address.parse(giver.address)
-        const myShard = new BitReader(new BitString(myAddress.hash, 0, 1024)).loadUint(
-            shardMaxDepth
-        )
-        const giverShard = new BitReader(new BitString(giverAddress.hash, 0, 1024)).loadUint(
-            shardMaxDepth
-        )
-
-        if (myShard === giverShard) {
-            return true
-        }
-
-        return false
-    })
-    if (whitelistGivers.length === 0) {
-        whitelistGivers = [...givers]
-    }
-
-    if (liteClient instanceof TonClient4) {
-        const lastInfo = await CallForSuccess(() => liteClient.getLastBlock())
-
-        let newBestGiber: { address: string, coins: number } = { address: '', coins: 0 }
-        await Promise.all(whitelistGivers.map(async (giver) => {
-            const stack = await CallForSuccess(() => liteClient.runMethod(lastInfo.last.seqno, Address.parse(giver.address), 'get_pow_params', []))
-            // const powStack = Cell.fromBase64(powInfo.result as string)
-            // const stack = parseTuple(powStack)
-
-
-            const reader = new TupleReader(stack.result)
-            const seed = reader.readBigNumber()
-            const complexity = reader.readBigNumber()
-            const iterations = reader.readBigNumber()
-
-            const hashes = totalDiff / complexity
-            const coinsPerHash = giver.reward / Number(hashes)
-            if (coinsPerHash > newBestGiber.coins) {
-                newBestGiber = { address: giver.address, coins: coinsPerHash }
-            }
-        }))
-        bestGiver = newBestGiber
-    } else if (liteClient instanceof LiteClient) {
-        const lastInfo = await liteClient.getMasterchainInfo()
-
-        let newBestGiber: { address: string, coins: number } = { address: '', coins: 0 }
-        await Promise.all(whitelistGivers.map(async (giver) => {
-            const powInfo = await liteClient.runMethod(Address.parse(giver.address), 'get_pow_params', Buffer.from([]), lastInfo.last)
-            const powStack = Cell.fromBase64(powInfo.result as string)
-            const stack = parseTuple(powStack)
-
-
-            const reader = new TupleReader(stack)
-            const seed = reader.readBigNumber()
-            const complexity = reader.readBigNumber()
-            const iterations = reader.readBigNumber()
-
-            const hashes = totalDiff / complexity
-            const coinsPerHash = giver.reward / Number(hashes)
-            if (coinsPerHash > newBestGiber.coins) {
-                newBestGiber = { address: giver.address, coins: coinsPerHash }
-            }
-        }))
-        bestGiver = newBestGiber
+async function updateBestGivers(liteClient: ApiObj, myAddress: Address) {
+    const giver = givers[Math.floor(Math.random() * givers.length)]
+    bestGiver = {
+        address: giver.address,
+        coins: giver.reward,
     }
 }
 
-async function getPowInfo(liteClient: TonClient4 | LiteClient, address: Address): Promise<[bigint, bigint, bigint]> {
+async function getPowInfo(liteClient: ApiObj, address: Address): Promise<[bigint, bigint, bigint]> {
     if (liteClient instanceof TonClient4) {
         const lastInfo = await CallForSuccess(() => liteClient.getLastBlock())
         const powInfo = await CallForSuccess(() => liteClient.runMethod(lastInfo.last.seqno, address, 'get_pow_params', []))
@@ -171,15 +113,38 @@ async function getPowInfo(liteClient: TonClient4 | LiteClient, address: Address)
         const iterations = reader.readBigNumber()
 
         return [seed, complexity, iterations]
-    }
+    } else if (liteClient instanceof Api) {
+        try {
+            const powInfo = await CallForSuccess(
+                () => liteClient.blockchain.execGetMethodForBlockchainAccount(address.toRawString(), 'get_pow_params', {}),
+                50,
+                300)
 
+            const seed = BigInt(powInfo.stack[0].num as string)
+            const complexity = BigInt(powInfo.stack[1].num as string)
+            const iterations = BigInt(powInfo.stack[2].num as string)
+
+            return [seed, complexity, iterations]
+        } catch (e) {
+            console.log('ls error', e)
+        }
+    }
     throw new Error('invalid client')
 }
 
 let go = true
 let i = 0
+let lastMinedSeed: bigint = BigInt(0)
 async function main() {
-    let liteClient: TonClient4 | LiteClient
+    const minerOk = await testMiner()
+    if (!minerOk) {
+        console.log('Your miner is not working')
+        console.log('Check if you use correct bin (cuda, amd).')
+        console.log('If it doesn\'t help, try to run test_cuda or test_opencl script, to find out issue')
+        process.exit(1)
+    }
+
+    let liteClient: ApiObj
     if (!args['--api']) {
         console.log('Using TonHub API')
         liteClient = await getTon4Client()
@@ -187,6 +152,9 @@ async function main() {
         if (args['--api'] === 'lite') {
             console.log('Using LiteServer API')
             liteClient = await getLiteClient(args['-c'] ?? 'https://ton-blockchain.github.io/global.config.json')
+        } else if (args['--api'] === 'tonapi') {
+            console.log('Using TonApi')
+            liteClient = await getTonapiClient()
         } else {
             console.log('Using TonHub API')
             liteClient = await getTon4Client()
@@ -204,17 +172,29 @@ async function main() {
     } else {
         console.log('Using v4r2 wallet', wallet.address.toString({ bounceable: false, urlSafe: true }))
     }
-    const opened = liteClient.open(wallet)
 
-    await updateBestGivers(liteClient, wallet.address)
+
+
+    try {
+        await updateBestGivers(liteClient, wallet.address)
+    } catch (e) {
+        console.log('error', e)
+        throw Error('no givers')
+    }
 
     setInterval(() => {
         updateBestGivers(liteClient, wallet.address)
-    }, 30000)
+    }, 5000)
 
     while (go) {
         const giverAddress = bestGiver.address
         const [seed, complexity, iterations] = await getPowInfo(liteClient, Address.parse(giverAddress))
+        if (seed === lastMinedSeed) {
+            // console.log('Wating for a new seed')
+            updateBestGivers(liteClient, wallet.address)
+            await delay(200)
+            continue
+        }
 
         const randomName = (await getSecureRandomBytes(8)).toString('hex') + '.boc'
         const path = `bocs/${randomName}`
@@ -226,6 +206,7 @@ async function main() {
         let mined: Buffer | undefined = undefined
         try {
             mined = fs.readFileSync(path)
+            lastMinedSeed = seed
             fs.rmSync(path)
         } catch (e) {
             //
@@ -241,40 +222,26 @@ async function main() {
             }
 
             console.log(`${new Date()}:     mined`, seed, i++)
-
-
-            let w = opened as OpenedContract<WalletContractV4>
             let seqno = 0
-            try {
-                seqno = await CallForSuccess(() => w.getSeqno())
-            } catch (e) {
-                //
-            }
-            sendMinedBoc(wallet, seqno, keyPair, giverAddress, Cell.fromBoc(mined as Buffer)[0].asSlice().loadRef())
-            // for (let j = 0; j < 5; j++) {
-            //     try {
-            //         await CallForSuccess(() => {
 
-            //             return w.sendTransfer({
-            //                 seqno,
-            //                 secretKey: keyPair.secretKey,
-            //                 messages: [internal({
-            //                     to: giverAddress,
-            //                     value: toNano('0.05'),
-            //                     bounce: true,
-            //                     body: Cell.fromBoc(mined as Buffer)[0].asSlice().loadRef(),
-            //                 })],
-            //                 sendMode: 3 as any,
-            //             })
-            //         })
-            //         break
-            //     } catch (e) {
-            //         if (j === 4) {
-            //             throw e
-            //         }
-            //         //
-            //     }
-            // }
+            if (liteClient instanceof LiteClient || liteClient instanceof TonClient4) {
+                let w = liteClient.open(wallet)
+                try {
+                    seqno = await CallForSuccess(() => w.getSeqno())
+                } catch (e) {
+                    //
+                }
+            } else {
+                const res = await CallForSuccess(
+                    () => (liteClient as Api<unknown>).blockchain.execGetMethodForBlockchainAccount(wallet.address.toRawString(), "seqno", {}),
+                    50,
+                    250
+                )
+                if (res.success) {
+                    seqno = Number(BigInt(res.stack[0].num as string))
+                }
+            }
+            await sendMinedBoc(wallet, seqno, keyPair, giverAddress, Cell.fromBoc(mined as Buffer)[0].asSlice().loadRef())
         }
     }
 }
@@ -302,23 +269,90 @@ async function sendMinedBoc(
         wallets.push(w1)
     }
 
-    for (let i = 0; i < 3; i++) {
-        for (const w of wallets) {
-            w.sendTransfer({
-                seqno,
-                secretKey: keyPair.secretKey,
-                messages: [internal({
-                    to: giverAddress,
-                    value: toNano('0.05'),
-                    bounce: true,
-                    body: boc,
-                })],
-                sendMode: 3 as any,
-            }).catch(e => {
-                //
-            })
+    if (args['--api'] === 'tonapi') {
+        const tonapiClient = await getTonapiClient()
+
+        const transfer = wallet.createTransfer({
+            seqno,
+            secretKey: keyPair.secretKey,
+            messages: [internal({
+                to: giverAddress,
+                value: toNano('0.05'),
+                bounce: true,
+                body: boc,
+            })],
+            sendMode: 3 as any,
+        })
+        const msg = beginCell().store(storeMessage(external({
+            to: wallet.address,
+            body: transfer
+        }))).endCell()
+
+        let k = 0
+        let lastError: unknown
+
+        while (k < 20) {
+            try {
+                await tonapiClient.blockchain.sendBlockchainMessage({
+                    boc: msg.toBoc().toString('base64'),
+                })
+                break
+                // return res
+            } catch (e: any) {
+                // lastError = err
+                k++
+
+                if (e.status === 429) {
+                    await delay(200)
+                } else {
+                    // console.log('tonapi error')
+                    k = 20
+                    break
+                }
+
+            }
+        }
+    } else {
+        for (let i = 0; i < 3; i++) {
+            for (const w of wallets) {
+                w.sendTransfer({
+                    seqno,
+                    secretKey: keyPair.secretKey,
+                    messages: [internal({
+                        to: giverAddress,
+                        value: toNano('0.05'),
+                        bounce: true,
+                        body: boc,
+                    })],
+                    sendMode: 3 as any,
+                }).catch(e => {
+                    //
+                })
+            }
         }
     }
+}
+
+async function testMiner(): Promise<boolean> {
+    const randomName = (await getSecureRandomBytes(8)).toString('hex') + '.boc'
+    const path = `bocs/${randomName}`
+    const command = `${bin} -g ${gpu} -F 128 -t ${timeout} kQBWkNKqzCAwA9vjMwRmg7aY75Rf8lByPA9zKXoqGkHi8SM7 229760179690128740373110445116482216837 53919893334301279589334030174039261347274288845081144962207220498400000000000 10000000000 kQBWkNKqzCAwA9vjMwRmg7aY75Rf8lByPA9zKXoqGkHi8SM7 ${path}`
+    try {
+        const output = execSync(command, { encoding: 'utf-8', stdio: "pipe" });  // the default is 'buffer'
+    } catch (e) {
+    }
+    let mined: Buffer | undefined = undefined
+    try {
+        mined = fs.readFileSync(path)
+        fs.rmSync(path)
+    } catch (e) {
+        //
+    }
+    if (!mined) {
+        return false
+    }
+    
+    return true
 }
 
 
