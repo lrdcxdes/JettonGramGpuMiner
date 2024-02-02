@@ -14,6 +14,7 @@ import { getLiteClient, getTon4Client, getTon4ClientOrbs, getTonCenterClient } f
 import { HighloadWalletV2 } from '@scaleton/highload-wallet';
 import { OpenedContract } from '@ton/core';
 import { BlockID } from 'ton-lite-client';
+import chalk from 'chalk';
 
 dotenv.config({ path: 'config.txt.txt' })
 dotenv.config({ path: '.env.txt' })
@@ -102,7 +103,7 @@ async function updateBestGivers(liteClient: TonClient4 | LiteClient, myAddress: 
 
         return false
     })
-    console.log('Whitelist: ', whitelistGivers.length)
+    // console.log('Whitelist: ', whitelistGivers.length)
 
     if (liteClient instanceof TonClient4) {
         const lastInfo = await CallForSuccess(() => liteClient.getLastBlock())
@@ -238,20 +239,24 @@ async function main() {
     }
     const opened = liteClient.open(wallet)
 
-    await updateBestGivers(liteClient, wallet.address)
+    var address_giver = givers[0]
 
-    setInterval(() => {
-        updateBestGivers(liteClient, wallet.address)
-    }, 1000)
+    if (givers.length > 1) {
+        await updateBestGivers(liteClient, wallet.address)
+
+        setInterval(() => {
+            updateBestGivers(liteClient, wallet.address)
+        }, 1000)
+    }
 
     while (go) {
         // console.log('waiting master')
         const nextMaster  = await getNextMaster(liteClient)
-        console.log('got next master')
-        const giverAddress = bestGiver.address
+        // console.log('got next master')
+        const giverAddress = bestGiver.address || address_giver.address
         const [seed, complexity, iterations] = await getPowInfo(liteClient, Address.parse(giverAddress), nextMaster)
 
-        console.log('got giver address', giverAddress)
+        // console.log(`${new Date()}:     Address: ${chalk.bold(chalk.blue(giverAddress))}`)
         const randomName = (await getSecureRandomBytes(8)).toString('hex') + '.boc'
         const path = `bocs/${randomName}`
         const command = `${bin} -g ${gpu} -F 128 -t ${timeout} ${wallet.address.toString({ urlSafe: true, bounceable: true })} ${seed} ${complexity} ${iterations} ${giverAddress} ${path}`
@@ -266,18 +271,15 @@ async function main() {
         } catch (e) {
             //
         }
+
+        i++
+        
         if (!mined) {
-            console.log(`${new Date()}: not mined`, seed, i++)
+            console.log(`${new Date()}:     ${chalk.bold(chalk.red('Не смайнилось!'))}, попытка ${i}`)
+            continue
         }
         if (mined) {
-            // const [newSeed] = await getPowInfo(liteClient, Address.parse(giverAddress))
-            // if (newSeed !== seed) {
-            //     console.log('Mined already too late seed')
-            //     continue
-            // }
-
-            console.log(`${new Date()}:     mined`, seed, i++)
-
+            console.log(`${new Date()}:     ${chalk.bold(chalk.green('Смайнилось!'))}, попытка ${i}`)
 
             let w = opened as OpenedContract<WalletContractV4>
             let seqno = 0
@@ -287,42 +289,27 @@ async function main() {
                 //
             }
             sendMinedBoc(wallet, seqno, keyPair, giverAddress, Cell.fromBoc(mined as Buffer)[0].asSlice().loadRef())
-
-            // let seqnov3 = 0
-            // try {
-            //     seqnov3 = await CallForSuccess(() => liteClient.open(walletv3r2).getSeqno())
-            // } catch (e) {
-            //     //
-            // }
-            // sendMinedBoc(walletv3r2, seqnov3, keyPair, giverAddress, Cell.fromBoc(mined as Buffer)[0].asSlice().loadRef())
-            // for (let j = 0; j < 5; j++) {
-            //     try {
-            //         await CallForSuccess(() => {
-
-            //             return w.sendTransfer({
-            //                 seqno,
-            //                 secretKey: keyPair.secretKey,
-            //                 messages: [internal({
-            //                     to: giverAddress,
-            //                     value: toNano('0.05'),
-            //                     bounce: true,
-            //                     body: Cell.fromBoc(mined as Buffer)[0].asSlice().loadRef(),
-            //                 })],
-            //                 sendMode: 3 as any,
-            //             })
-            //         })
-            //         break
-            //     } catch (e) {
-            //         if (j === 4) {
-            //             throw e
-            //         }
-            //         //
-            //     }
-            // }
         }
     }
 }
 main()
+
+
+async function sendTransfer(w, seqno: number, keyPair: KeyPair, giverAddress: string, boc: Cell) {
+    w.sendTransfer({
+        seqno,
+        secretKey: keyPair.secretKey,
+        messages: [internal({
+            to: giverAddress,
+            value: toNano('0.05'),
+            bounce: true,
+            body: boc,
+        })],
+        sendMode: 3 as any,
+    }).catch(e => {
+        //
+    })
+}
 
 async function sendMinedBoc(
     wallet: WalletContractV4,
@@ -334,70 +321,19 @@ async function sendMinedBoc(
     const liteServerClient = await getLiteClient(args['-c'] ?? 'https://ton-blockchain.github.io/global.config.json')
     const ton4Client = await getTon4Client()
     const tonOrbsClient = await getTon4ClientOrbs()
-    const toncenterClient = await getTonCenterClient()
+    // const toncenterClient = await getTonCenterClient()
 
-    const w1 = liteServerClient.open(wallet)
-    const w2 = ton4Client.open(wallet)
-    const w3 = tonOrbsClient.open(wallet)
-    const w4 = toncenterClient.open(wallet)
+    sendTransfer(liteServerClient.open(wallet), seqno, keyPair, giverAddress, boc)
+    sendTransfer(ton4Client.open(wallet), seqno, keyPair, giverAddress, boc)
+    sendTransfer(tonOrbsClient.open(wallet), seqno, keyPair, giverAddress, boc)
+    // sendTransfer(toncenterClient.open(wallet), seqno, keyPair, giverAddress, boc)
 
-    const wallets = [w1, w2, w3]
+    // const w1 = liteServerClient.open(wallet)
+    // const w2 = ton4Client.open(wallet)
+    // const w3 = tonOrbsClient.open(wallet)
+    // const w4 = toncenterClient.open(wallet)
 
-
-    // const transferBoc = w1.createTransfer({
-    //     seqno,
-    //     secretKey: keyPair.secretKey,
-    //     messages: [internal({
-    //         to: giverAddress,
-    //         value: toNano('0.05'),
-    //         bounce: true,
-    //         body: boc,
-    //     })],
-    //     sendMode: 3 as any,
-    // })
-
-
-    // console.log('send seqno', seqno)
-    // const ext = external({
-    //     to: Address.parse(giverAddress),
-    //     body: transferBoc
-    // })
-    // const dataBoc = beginCell().store(storeMessage(ext)).endCell()
-    // toncenterClient.sendFile(dataBoc.toBoc()).then(() => {
-    //     console.log('toncenter success')
-    // }).catch(e => {
-    //     //
-    //     console.log('toncenter send error', e)
-    // })
-    // w4.sendTransfer({
-    //     seqno,
-    //     secretKey: keyPair.secretKey,
-    //     messages: [internal({
-    //         to: giverAddress,
-    //         value: toNano('0.05'),
-    //         bounce: true,
-    //         body: boc,
-    //     })],
-    //     sendMode: 3 as any,
-    // })
-
-    for (let i = 0; i < 3; i++) {
-        for (const w of wallets) {
-            w.sendTransfer({
-                seqno,
-                secretKey: keyPair.secretKey,
-                messages: [internal({
-                    to: giverAddress,
-                    value: toNano('0.05'),
-                    bounce: true,
-                    body: boc,
-                })],
-                sendMode: 3 as any,
-            }).catch(e => {
-                //
-            })
-        }
-    }
+    // const wallets = [w1, w2, w3]
 }
 
 
