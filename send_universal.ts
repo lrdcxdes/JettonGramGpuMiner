@@ -7,12 +7,13 @@ import { execSync } from 'child_process';
 import fs from 'fs'
 import { WalletContractV4 } from '@ton/ton';
 import dotenv from 'dotenv'
-import { givers10000, givers100, givers1000 } from './givers'
+import { givers100, givers1000 } from './givers'
 import arg from 'arg'
 import { LiteClient, LiteSingleEngine, LiteRoundRobinEngine } from 'ton-lite-client';
 import { getLiteClient, getTon4Client, getTon4ClientOrbs, getTonCenterClient } from './client';
 import { HighloadWalletV2 } from '@scaleton/highload-wallet';
 import { OpenedContract } from '@ton/core';
+import { Api } from 'tonapi-sdk-js';
 
 dotenv.config({ path: 'config.txt.txt' })
 dotenv.config({ path: '.env.txt' })
@@ -30,10 +31,10 @@ const args = arg({
 })
 
 
-let givers = givers10000
+let givers = givers1000
 if (args['--givers']) {
     const val = args['--givers']
-    const allowed = [100, 1000, 10000]
+    const allowed = [100, 1000]
     if (!allowed.includes(val)) {
         throw new Error('Invalid --givers argument')
     }
@@ -46,10 +47,6 @@ if (args['--givers']) {
         case 1000:
             givers = givers1000
             console.log('Using givers 1 000')
-            break
-        case 10000:
-            givers = givers10000
-            console.log('Using givers 10 000')
             break
     }
 } else {
@@ -100,9 +97,7 @@ async function updateBestGivers(liteClient: TonClient4 | LiteClient, myAddress: 
 
         return false
     })
-    console.log('Whitelist: ', whitelistGivers.length)
     if (whitelistGivers.length === 0) {
-        console.log('Shard givers empty, using all')
         whitelistGivers = [...givers]
     }
 
@@ -215,7 +210,7 @@ async function main() {
 
     setInterval(() => {
         updateBestGivers(liteClient, wallet.address)
-    }, 1000)
+    }, 30000)
 
     while (go) {
         const giverAddress = bestGiver.address
@@ -292,55 +287,20 @@ async function sendMinedBoc(
     giverAddress: string,
     boc: Cell
 ) {
-    const liteServerClient = await getLiteClient(args['-c'] ?? 'https://ton-blockchain.github.io/global.config.json')
+
+    const wallets: OpenedContract<WalletContractV4>[] = []
     const ton4Client = await getTon4Client()
     const tonOrbsClient = await getTon4ClientOrbs()
-    const toncenterClient = await getTonCenterClient()
-
-    const w1 = liteServerClient.open(wallet)
     const w2 = ton4Client.open(wallet)
     const w3 = tonOrbsClient.open(wallet)
-    const w4 = toncenterClient.open(wallet)
+    wallets.push(w2)
+    wallets.push(w3)
 
-    const wallets = [w1, w2, w3]
-
-
-    // const transferBoc = w1.createTransfer({
-    //     seqno,
-    //     secretKey: keyPair.secretKey,
-    //     messages: [internal({
-    //         to: giverAddress,
-    //         value: toNano('0.05'),
-    //         bounce: true,
-    //         body: boc,
-    //     })],
-    //     sendMode: 3 as any,
-    // })
-
-
-    // console.log('send seqno', seqno)
-    // const ext = external({
-    //     to: Address.parse(giverAddress),
-    //     body: transferBoc
-    // })
-    // const dataBoc = beginCell().store(storeMessage(ext)).endCell()
-    // toncenterClient.sendFile(dataBoc.toBoc()).then(() => {
-    //     console.log('toncenter success')
-    // }).catch(e => {
-    //     //
-    //     console.log('toncenter send error', e)
-    // })
-    // w4.sendTransfer({
-    //     seqno,
-    //     secretKey: keyPair.secretKey,
-    //     messages: [internal({
-    //         to: giverAddress,
-    //         value: toNano('0.05'),
-    //         bounce: true,
-    //         body: boc,
-    //     })],
-    //     sendMode: 3 as any,
-    // })
+    if (args['--api'] === 'lite') {
+        const liteServerClient = await getLiteClient(args['-c'] ?? 'https://ton-blockchain.github.io/global.config.json')
+        const w1 = liteServerClient.open(wallet)
+        wallets.push(w1)
+    }
 
     for (let i = 0; i < 3; i++) {
         for (const w of wallets) {
